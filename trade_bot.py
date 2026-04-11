@@ -2,7 +2,6 @@
 """
 Telegram бот для автоматического принятия выгодных обменов на mangabuff.ru
 Принимает только предложения, где предлагают 2 карты, а отдать нужно 1 (2:1)
-Без использования beautifulsoup4 – только стандартный html.parser
 """
 
 import os
@@ -14,7 +13,12 @@ import threading
 import html
 from pathlib import Path
 from urllib.parse import unquote
-from html.parser import HTMLParser
+
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    print("❌ Установите beautifulsoup4: pip install beautifulsoup4")
+    sys.exit(1)
 
 try:
     from curl_cffi.requests import Session as CffiSession
@@ -37,169 +41,6 @@ try:
 except ImportError:
     print("❌ Установите python-dotenv: pip install python-dotenv")
     sys.exit(1)
-
-# ==================== ПАРСЕР СПИСКА ОБМЕНОВ ====================
-class TradesListParser(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.trades = []
-        self.in_trade_link = False
-        self.current_trade = {}
-        self.current_tag = None
-        self.in_info_div = False
-        self.in_date_div = False
-        self.in_name_div = False
-        self.in_header_div = False
-        self.new_dot_found = False
-
-    def handle_starttag(self, tag, attrs):
-        attrs_dict = dict(attrs)
-        # Ищем <a class="... trade__list-item ...">
-        if tag == 'a' and 'class' in attrs_dict:
-            classes = attrs_dict['class'].split()
-            if 'trade__list-item' in classes:
-                self.in_trade_link = True
-                self.current_trade = {}
-                href = attrs_dict.get('href', '')
-                if href and '/trades/' in href:
-                    self.current_trade['trade_id'] = href.split('/')[-1]
-                    self.current_trade['url'] = f"https://mangabuff.ru{href}"
-                self.current_trade['is_new'] = False
-                self.current_trade['sender_name'] = ''
-                self.current_trade['date'] = ''
-
-        if self.in_trade_link:
-            if tag == 'div' and 'class' in attrs_dict:
-                classes = attrs_dict['class'].split()
-                if 'trade__list-info' in classes:
-                    self.in_info_div = True
-                elif 'trade__list-date' in classes:
-                    self.in_date_div = True
-                elif 'trade__list-name' in classes:
-                    self.in_name_div = True
-                elif 'trade__list-header' in classes:
-                    self.in_header_div = True
-            # Ищем span с классом trade__list-dot--new внутри header
-            if tag == 'span' and self.in_header_div and 'class' in attrs_dict:
-                classes = attrs_dict['class'].split()
-                if 'trade__list-dot--new' in classes:
-                    self.new_dot_found = True
-
-    def handle_endtag(self, tag):
-        if tag == 'a' and self.in_trade_link:
-            if self.current_trade.get('trade_id'):
-                self.trades.append(self.current_trade)
-            self.in_trade_link = False
-            self.current_trade = {}
-        if tag == 'div':
-            if self.in_info_div:
-                self.in_info_div = False
-            elif self.in_date_div:
-                self.in_date_div = False
-            elif self.in_name_div:
-                self.in_name_div = False
-            elif self.in_header_div:
-                self.in_header_div = False
-                if self.new_dot_found:
-                    if self.current_trade:
-                        self.current_trade['is_new'] = True
-                    self.new_dot_found = False
-
-    def handle_data(self, data):
-        if self.in_date_div:
-            self.current_trade['date'] = data.strip()
-        elif self.in_name_div:
-            # Убираем префикс "от "
-            name = data.strip()
-            if name.startswith('от '):
-                name = name[3:]
-            self.current_trade['sender_name'] = name
-
-# ==================== ПАРСЕР ДЕТАЛЕЙ ОБМЕНА ====================
-class TradeDetailsParser(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.details = {
-            'trade_id': None,
-            'sender_id': None,
-            'sender_name': None,
-            'offered_cards': [],
-            'required_cards': [],
-            'viewed': False,
-            'url': None
-        }
-        self.in_creator_items = False
-        self.in_receiver_items = False
-        self.in_card_link = False
-        self.current_card = {}
-        self.in_viewed_span = False
-        self.in_sender_link = False
-
-    def handle_starttag(self, tag, attrs):
-        attrs_dict = dict(attrs)
-
-        # Имя отправителя: <a class="trade__header-name" href="/users/12345">
-        if tag == 'a' and 'class' in attrs_dict and 'trade__header-name' in attrs_dict['class']:
-            self.in_sender_link = True
-            href = attrs_dict.get('href', '')
-            if href and '/users/' in href:
-                self.details['sender_id'] = href.split('/')[-1]
-
-        # Флаг просмотра: <span class="trade__viewed--yes">
-        if tag == 'span' and 'class' in attrs_dict and 'trade__viewed--yes' in attrs_dict['class']:
-            self.in_viewed_span = True
-
-        # Блок предлагаемых карт (creator)
-        if tag == 'div' and 'class' in attrs_dict:
-            classes = attrs_dict['class'].split()
-            if 'trade__main-items' in classes and 'trade__main-items--creator' in classes:
-                self.in_creator_items = True
-            elif 'trade__main-items' in classes and 'trade__main-items--receiver' in classes:
-                self.in_receiver_items = True
-
-        # Ссылка на карту внутри блока
-        if (self.in_creator_items or self.in_receiver_items) and tag == 'a' and 'class' in attrs_dict:
-            card_classes = attrs_dict['class'].split()
-            if 'trade__main-item' in card_classes:
-                self.in_card_link = True
-                self.current_card = {}
-                href = attrs_dict.get('href', '')
-                if href and '/cards/' in href:
-                    self.current_card['url'] = f"https://mangabuff.ru{href}"
-                    # ID карты: /cards/12345/
-                    match = re.search(r'/cards/(\d+)/', href)
-                    if match:
-                        self.current_card['card_id'] = match.group(1)
-                # Изображение будет в следующем теге img, его data соберём отдельно
-
-        # Изображение карты
-        if self.in_card_link and tag == 'img':
-            src = attrs_dict.get('src', '')
-            self.current_card['image'] = src
-
-    def handle_endtag(self, tag):
-        if tag == 'a' and self.in_card_link:
-            if self.current_card and self.current_card.get('url'):
-                if self.in_creator_items:
-                    self.details['offered_cards'].append(self.current_card)
-                elif self.in_receiver_items:
-                    self.details['required_cards'].append(self.current_card)
-            self.in_card_link = False
-            self.current_card = {}
-        if tag == 'div':
-            if self.in_creator_items:
-                self.in_creator_items = False
-            elif self.in_receiver_items:
-                self.in_receiver_items = False
-        if tag == 'a' and self.in_sender_link:
-            self.in_sender_link = False
-
-    def handle_data(self, data):
-        if self.in_sender_link:
-            self.details['sender_name'] = data.strip()
-        if self.in_viewed_span:
-            self.details['viewed'] = True
-            self.in_viewed_span = False
 
 # ==================== КЛАСС АВТОРИЗАЦИИ ====================
 class MangaBuffAuth:
@@ -312,23 +153,81 @@ def get_trades(auth: MangaBuffAuth):
     response = auth.session.get(url)
     if response.status_code != 200:
         return []
-    parser = TradesListParser()
-    parser.feed(response.text)
-    return parser.trades
+    soup = BeautifulSoup(response.text, 'html.parser')
+    trades = []
+    trade_items = soup.find_all('a', class_=lambda c: c and 'trade__list-item' in c.split())
+    for item in trade_items:
+        href = item.get('href')
+        if not href or '/trades/' not in href:
+            continue
+        trade_id = href.split('/')[-1]
+        trade_url = f"{auth.BASE_URL}{href}"
+        info_div = item.find('div', class_='trade__list-info')
+        if not info_div:
+            continue
+        date_elem = info_div.find('div', class_='trade__list-date')
+        date = date_elem.text.strip() if date_elem else ""
+        name_elem = info_div.find('div', class_='trade__list-name')
+        sender_name = name_elem.text.replace('от ', '').strip() if name_elem else ""
+        header_div = info_div.find('div', class_='trade__list-header')
+        is_new = bool(header_div and header_div.find('span', class_='trade__list-dot--new'))
+        trades.append({
+            'trade_id': trade_id,
+            'sender_name': sender_name,
+            'date': date,
+            'is_new': is_new,
+            'url': trade_url
+        })
+    return trades
 
 def get_trade_details(auth: MangaBuffAuth, trade_id: str):
     url = f"{auth.BASE_URL}/trades/{trade_id}"
     response = auth.session.get(url)
     if response.status_code != 200:
         return None
-    parser = TradeDetailsParser()
-    parser.feed(response.text)
-    details = parser.details
-    details['trade_id'] = trade_id
-    details['url'] = url
-    return details
+    soup = BeautifulSoup(response.text, 'html.parser')
+    sender_elem = soup.find('a', class_='trade__header-name')
+    if not sender_elem:
+        return None
+    sender_name = sender_elem.text.strip()
+    sender_id = sender_elem.get('href', '').split('/')[-1]
+    viewed_elem = soup.find('span', class_='trade__viewed--yes')
+    viewed = bool(viewed_elem)
+
+    offered_cards = []
+    creator_div = soup.find('div', class_='trade__main-items trade__main-items--creator')
+    if creator_div:
+        card_links = creator_div.find_all('a', class_='trade__main-item')
+        for link in card_links:
+            card_url = f"{auth.BASE_URL}{link.get('href')}"
+            card_id = card_url.split('/')[-2] if '/cards/' in card_url else ''
+            img = link.find('img')
+            img_url = img.get('src') if img else ''
+            offered_cards.append({'card_id': card_id, 'url': card_url, 'image': img_url})
+
+    required_cards = []
+    receiver_div = soup.find('div', class_='trade__main-items trade__main-items--receiver')
+    if receiver_div:
+        card_links = receiver_div.find_all('a', class_='trade__main-item')
+        for link in card_links:
+            card_url = f"{auth.BASE_URL}{link.get('href')}"
+            card_id = card_url.split('/')[-2] if '/cards/' in card_url else ''
+            img = link.find('img')
+            img_url = img.get('src') if img else ''
+            required_cards.append({'card_id': card_id, 'url': card_url, 'image': img_url})
+
+    return {
+        'trade_id': trade_id,
+        'sender_id': sender_id,
+        'sender_name': sender_name,
+        'offered_cards': offered_cards,
+        'required_cards': required_cards,
+        'viewed': viewed,
+        'url': f"{auth.BASE_URL}/trades/{trade_id}"
+    }
 
 def accept_trade(auth: MangaBuffAuth, trade_id: str):
+    """Принимает обмен, отправляя POST-запрос. Считает успехом любой не-ошибочный ответ."""
     csrf = auth._get_csrf_from_cookies()
     if not csrf:
         return False, "CSRF token not found"
@@ -349,7 +248,9 @@ def accept_trade(auth: MangaBuffAuth, trade_id: str):
     for endpoint in endpoints:
         try:
             resp = auth.session.post(endpoint, headers=headers, data={'trade_id': trade_id})
+            # Если статус 2xx или 3xx – считаем успехом, кроме явных ошибок 4xx/5xx
             if resp.status_code < 400:
+                # Дополнительно проверим, что ответ не содержит сообщения об ошибке
                 try:
                     data = resp.json()
                     if data.get('error'):
