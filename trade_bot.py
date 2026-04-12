@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram бот для автоматического принятия выгодных обменов на mangabuff.ru
-Принимает только предложения, где предлагают 2 карты, а отдать нужно 1 (2:1)
+Принимает предложения, где вы отдаёте 1 карту, а получаете 2 и более (2:1, 3:1, 4:1, ...)
 """
 
 import os
@@ -248,9 +248,7 @@ def accept_trade(auth: MangaBuffAuth, trade_id: str):
     for endpoint in endpoints:
         try:
             resp = auth.session.post(endpoint, headers=headers, data={'trade_id': trade_id})
-            # Если статус 2xx или 3xx – считаем успехом, кроме явных ошибок 4xx/5xx
             if resp.status_code < 400:
-                # Дополнительно проверим, что ответ не содержит сообщения об ошибке
                 try:
                     data = resp.json()
                     if data.get('error'):
@@ -342,7 +340,8 @@ def monitoring_loop(chat_id):
         monitoring_active = False
         return
 
-    bot.send_message(chat_id, f"🔁 Мониторинг обменов запущен. Проверка каждые {CHECK_INTERVAL} сек.\nПринимаются только обмены 2:1 (вам 2, вы отдаёте 1).")
+    # Изменён текст при запуске мониторинга
+    bot.send_message(chat_id, f"🔁 Мониторинг обменов запущен. Проверка каждые {CHECK_INTERVAL} сек.\nПринимаются обмены, где вы отдаёте 1 карту, а получаете 2 и более (2:1, 3:1, ...).")
 
     while monitoring_active:
         try:
@@ -359,7 +358,8 @@ def monitoring_loop(chat_id):
                 offered_count = len(details['offered_cards'])
                 required_count = len(details['required_cards'])
 
-                accept = (offered_count == 2 and required_count == 1)
+                # НОВОЕ УСЛОВИЕ: отдаём 1 карту, получаем 2 и более
+                accept = (required_count == 1 and offered_count >= 2)
                 result_msg = ""
                 if accept:
                     success, msg = accept_trade(auth, trade['trade_id'])
@@ -368,7 +368,14 @@ def monitoring_loop(chat_id):
                     else:
                         result_msg = f"❌ **Не удалось принять обмен**: {msg}"
                 else:
-                    result_msg = f"⏩ **Обмен проигнорирован** (не 2:1, а {offered_count}:{required_count})"
+                    # Причина отказа поясняется
+                    if required_count != 1:
+                        reason = f"вы отдаёте {required_count} карт (нужно ровно 1)"
+                    elif offered_count < 2:
+                        reason = f"вам предлагают только {offered_count} карт (нужно 2 и более)"
+                    else:
+                        reason = "неподходящие условия"
+                    result_msg = f"⏩ **Обмен проигнорирован** ({offered_count}:{required_count}) – {reason}"
 
                 message = f"🔄 **Новое предложение обмена**\n\n"
                 message += f"👤 *Отправитель:* {html.escape(details['sender_name'])}\n"
@@ -406,7 +413,7 @@ def cmd_start(message):
         "/login email password – войти в аккаунт\n"
         "/logout – выйти\n"
         "/status – проверить авторизацию\n"
-        "/monitor_start – запустить мониторинг обменов (автопринятие 2:1)\n"
+        "/monitor_start – запустить мониторинг обменов (автопринятие, если вы отдаёте 1 карту, а получаете 2+)\n"
         "/monitor_stop – остановить мониторинг\n\n"
         "Используйте кнопки для управления.",
         reply_markup=get_keyboard()
