@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram бот для автоматического принятия выгодных обменов на mangabuff.ru
-Принимает предложения, где вы отдаёте 1 карту, а получаете 2 и более.
-С параллельной обработкой и подробным логированием.
+Принимает предложения, где вы отдаёте 1 карту, а получаете 2 и более (2:1, 3:1, 4:1, ...)
 """
 
 import os
@@ -12,14 +11,8 @@ import re
 import time
 import threading
 import html
-import concurrent.futures
-import logging
 from pathlib import Path
 from urllib.parse import unquote
-
-# Устанавливаем кодировку для логирования
-import locale
-locale.setlocale(locale.LC_ALL, 'ru_RU.UTF-8')
 
 try:
     from bs4 import BeautifulSoup
@@ -30,7 +23,6 @@ except ImportError:
 try:
     from curl_cffi.requests import Session as CffiSession
     USE_CURL_CFFI = True
-    print("✅ Используется curl_cffi (обход Cloudflare)")
 except ImportError:
     import requests
     USE_CURL_CFFI = False
@@ -49,19 +41,6 @@ try:
 except ImportError:
     print("❌ Установите python-dotenv: pip install python-dotenv")
     sys.exit(1)
-
-# ==================== НАСТРОЙКА ЛОГИРОВАНИЯ ====================
-LOG_FILE = Path(__file__).parent / "bot.log"
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-logger.info("Бот запущен")
 
 # ==================== КЛАСС АВТОРИЗАЦИИ ====================
 class MangaBuffAuth:
@@ -100,15 +79,12 @@ class MangaBuffAuth:
         return ''
 
     def login(self, email: str, password: str):
-        logger.info(f"Попытка входа для {email}")
         resp = self.session.get(f'{self.BASE_URL}/login')
         if resp.status_code != 200:
-            logger.error(f"GET login failed: HTTP {resp.status_code}")
             return False, f'GET login failed: HTTP {resp.status_code}'
 
         csrf = self._get_csrf_from_cookies()
         if not csrf:
-            logger.error("CSRF token not found")
             return False, 'CSRF token not found'
 
         time.sleep(1)
@@ -122,11 +98,9 @@ class MangaBuffAuth:
             'Origin': self.BASE_URL,
         }
         resp = self.session.post(f'{self.BASE_URL}/login', data=login_data, headers=headers, allow_redirects=False)
-        logger.debug(f"Login POST status: {resp.status_code}")
 
         check = self.session.get(f'{self.BASE_URL}/')
         if check.status_code != 200:
-            logger.error(f"Auth check failed: HTTP {check.status_code}")
             return False, 'Auth check failed'
 
         html_text = check.text
@@ -138,10 +112,8 @@ class MangaBuffAuth:
             cookies = []
             for name, value in self.session.cookies.items():
                 cookies.append({'name': name, 'value': value, 'domain': 'mangabuff.ru'})
-            logger.info(f"Вход выполнен, user_id={user_id}")
             return True, {'user_id': user_id, 'cookies': cookies}
         else:
-            logger.error("User ID not found after login")
             return False, 'User ID not found after login'
 
     def load_cookies(self, cookies_list: list):
@@ -151,7 +123,6 @@ class MangaBuffAuth:
             domain = c.get('domain', 'mangabuff.ru')
             if name and value:
                 self.session.cookies.set(name, value, domain=domain)
-        logger.debug("Cookies загружены")
 
     def is_authenticated(self) -> bool:
         try:
@@ -164,8 +135,7 @@ class MangaBuffAuth:
             if 'header__user' in html_text or '/logout' in html_text:
                 return True
             return False
-        except Exception as e:
-            logger.error(f"Ошибка проверки авторизации: {e}")
+        except:
             return False
 
     def get_user_id(self) -> str:
@@ -180,45 +150,25 @@ class MangaBuffAuth:
 # ==================== ФУНКЦИИ ПАРСИНГА ОБМЕНОВ ====================
 def get_trades(auth: MangaBuffAuth):
     url = f"{auth.BASE_URL}/trades"
-    logger.debug(f"Запрос списка трейдов: {url}")
-    try:
-        response = auth.session.get(url, timeout=30)
-        logger.debug(f"Статус ответа: {response.status_code}")
-    except Exception as e:
-        logger.error(f"Ошибка запроса трейдов: {e}")
-        return []
-
+    response = auth.session.get(url)
     if response.status_code != 200:
-        logger.error(f"Не удалось получить трейды: HTTP {response.status_code}")
-        # Сохраняем HTML для диагностики
-        debug_file = Path(__file__).parent / f"debug_trades_{int(time.time())}.html"
-        debug_file.write_text(response.text[:5000], encoding='utf-8')
-        logger.debug(f"Сохранён фрагмент ответа в {debug_file}")
         return []
-
     soup = BeautifulSoup(response.text, 'html.parser')
     trades = []
-    # Ищем все ссылки с классом trade__list-item
     trade_items = soup.find_all('a', class_=lambda c: c and 'trade__list-item' in c.split())
-    logger.debug(f"Найдено элементов trade__list-item: {len(trade_items)}")
     for item in trade_items:
         href = item.get('href')
         if not href or '/trades/' not in href:
             continue
         trade_id = href.split('/')[-1]
         trade_url = f"{auth.BASE_URL}{href}"
-        # Ищем блок с информацией
         info_div = item.find('div', class_='trade__list-info')
         if not info_div:
-            logger.warning(f"Не найден trade__list-info для трейда {trade_id}")
             continue
         date_elem = info_div.find('div', class_='trade__list-date')
         date = date_elem.text.strip() if date_elem else ""
         name_elem = info_div.find('div', class_='trade__list-name')
-        if name_elem:
-            sender_name = name_elem.text.replace('от ', '').strip()
-        else:
-            sender_name = ""
+        sender_name = name_elem.text.replace('от ', '').strip() if name_elem else ""
         header_div = info_div.find('div', class_='trade__list-header')
         is_new = bool(header_div and header_div.find('span', class_='trade__list-dot--new'))
         trades.append({
@@ -228,24 +178,16 @@ def get_trades(auth: MangaBuffAuth):
             'is_new': is_new,
             'url': trade_url
         })
-    logger.info(f"Обработано трейдов: {len(trades)}")
     return trades
 
 def get_trade_details(auth: MangaBuffAuth, trade_id: str):
     url = f"{auth.BASE_URL}/trades/{trade_id}"
-    logger.debug(f"Загрузка деталей трейда {trade_id}")
-    try:
-        response = auth.session.get(url, timeout=30)
-    except Exception as e:
-        logger.error(f"Ошибка загрузки трейда {trade_id}: {e}")
-        return None
+    response = auth.session.get(url)
     if response.status_code != 200:
-        logger.error(f"Ошибка загрузки трейда {trade_id}: HTTP {response.status_code}")
         return None
     soup = BeautifulSoup(response.text, 'html.parser')
     sender_elem = soup.find('a', class_='trade__header-name')
     if not sender_elem:
-        logger.warning(f"Не найден отправитель в трейде {trade_id}")
         return None
     sender_name = sender_elem.text.strip()
     sender_id = sender_elem.get('href', '').split('/')[-1]
@@ -274,7 +216,6 @@ def get_trade_details(auth: MangaBuffAuth, trade_id: str):
             img_url = img.get('src') if img else ''
             required_cards.append({'card_id': card_id, 'url': card_url, 'image': img_url})
 
-    logger.debug(f"Трейд {trade_id}: offered={len(offered_cards)}, required={len(required_cards)}")
     return {
         'trade_id': trade_id,
         'sender_id': sender_id,
@@ -286,10 +227,9 @@ def get_trade_details(auth: MangaBuffAuth, trade_id: str):
     }
 
 def accept_trade(auth: MangaBuffAuth, trade_id: str):
-    logger.info(f"Попытка принять обмен {trade_id}")
+    """Принимает обмен, отправляя POST-запрос. Считает успехом любой не-ошибочный ответ."""
     csrf = auth._get_csrf_from_cookies()
     if not csrf:
-        logger.error(f"CSRF не найден для трейда {trade_id}")
         return False, "CSRF token not found"
     
     headers = {
@@ -307,23 +247,18 @@ def accept_trade(auth: MangaBuffAuth, trade_id: str):
     
     for endpoint in endpoints:
         try:
-            resp = auth.session.post(endpoint, headers=headers, data={'trade_id': trade_id}, timeout=15)
-            logger.debug(f"POST на {endpoint}, статус {resp.status_code}")
+            resp = auth.session.post(endpoint, headers=headers, data={'trade_id': trade_id})
             if resp.status_code < 400:
                 try:
                     data = resp.json()
                     if data.get('error'):
-                        logger.warning(f"Ошибка в ответе: {data.get('error')}")
                         continue
                 except:
                     pass
-                logger.info(f"Обмен {trade_id} успешно принят")
                 return True, "Обмен успешно принят!"
         except Exception as e:
-            logger.warning(f"Ошибка при POST на {endpoint}: {e}")
             continue
     
-    logger.error(f"Не удалось принять обмен {trade_id}")
     return False, "Не удалось принять обмен. Возможно, сайт использует другой метод."
 
 # ==================== НАСТРОЙКИ БОТА ====================
@@ -332,13 +267,12 @@ if not BOT_TOKEN:
     print("❌ Не найден TRADE_BOT_TOKEN или BOT_TOKEN в .env файле")
     sys.exit(1)
 
-CHECK_INTERVAL = 10          # Проверка каждые 10 секунд
+CHECK_INTERVAL = 30
 SESSIONS_FILE = Path(__file__).parent / "tg_sessions.json"
 PROCESSED_TRADES_FILE = Path(__file__).parent / "processed_trades.json"
 
 sessions = {}
 processed_trades = set()
-processed_lock = threading.Lock()
 monitoring_active = False
 monitoring_thread = None
 
@@ -363,8 +297,7 @@ def load_processed_trades():
             processed_trades = set()
 
 def save_processed_trades():
-    with processed_lock:
-        data = {"trades": list(processed_trades)}
+    data = {"trades": list(processed_trades)}
     PROCESSED_TRADES_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 load_sessions()
@@ -397,91 +330,78 @@ def get_keyboard():
     )
     return markup
 
-# ==================== ПАРАЛЛЕЛЬНЫЙ МОНИТОРИНГ ====================
+# ==================== МОНИТОРИНГ ====================
 def monitoring_loop(chat_id):
     global monitoring_active
-    logger.info(f"Запуск мониторинга для чата {chat_id}")
+    print(f"[TRADE-MONITOR] Запуск для чата {chat_id}")
     auth = get_auth_for_user(chat_id)
     if not auth.is_authenticated():
         bot.send_message(chat_id, "❌ Вы не авторизованы. Используйте /login")
         monitoring_active = False
         return
 
+    # Изменён текст при запуске мониторинга
     bot.send_message(chat_id, f"🔁 Мониторинг обменов запущен. Проверка каждые {CHECK_INTERVAL} сек.\nПринимаются обмены, где вы отдаёте 1 карту, а получаете 2 и более (2:1, 3:1, ...).")
 
-    def process_one_trade(trade, auth_copy, chat_id):
+    while monitoring_active:
         try:
-            details = get_trade_details(auth_copy, trade['trade_id'])
-            if not details:
-                return
+            trades = get_trades(auth)
+            new_trades = [t for t in trades if t['trade_id'] not in processed_trades]
+            for trade in new_trades:
+                processed_trades.add(trade['trade_id'])
+                save_processed_trades()
 
-            offered_count = len(details['offered_cards'])
-            required_count = len(details['required_cards'])
+                details = get_trade_details(auth, trade['trade_id'])
+                if not details:
+                    continue
 
-            accept = (required_count == 1 and offered_count >= 2)
-            result_msg = ""
-            if accept:
-                success, msg = accept_trade(auth_copy, trade['trade_id'])
-                if success:
-                    result_msg = "✅ **Обмен автоматически ПРИНЯТ!**"
+                offered_count = len(details['offered_cards'])
+                required_count = len(details['required_cards'])
+
+                # НОВОЕ УСЛОВИЕ: отдаём 1 карту, получаем 2 и более
+                accept = (required_count == 1 and offered_count >= 2)
+                result_msg = ""
+                if accept:
+                    success, msg = accept_trade(auth, trade['trade_id'])
+                    if success:
+                        result_msg = "✅ **Обмен автоматически ПРИНЯТ!**"
+                    else:
+                        result_msg = f"❌ **Не удалось принять обмен**: {msg}"
                 else:
-                    result_msg = f"❌ **Не удалось принять обмен**: {msg}"
-            else:
-                if required_count != 1:
-                    reason = f"вы отдаёте {required_count} карт (нужно ровно 1)"
-                elif offered_count < 2:
-                    reason = f"вам предлагают только {offered_count} карт (нужно 2 и более)"
-                else:
-                    reason = "неподходящие условия"
-                result_msg = f"⏩ **Обмен проигнорирован** ({offered_count}:{required_count}) – {reason}"
+                    # Причина отказа поясняется
+                    if required_count != 1:
+                        reason = f"вы отдаёте {required_count} карт (нужно ровно 1)"
+                    elif offered_count < 2:
+                        reason = f"вам предлагают только {offered_count} карт (нужно 2 и более)"
+                    else:
+                        reason = "неподходящие условия"
+                    result_msg = f"⏩ **Обмен проигнорирован** ({offered_count}:{required_count}) – {reason}"
 
-            message = f"🔄 **Новое предложение обмена**\n\n"
-            message += f"👤 *Отправитель:* {html.escape(details['sender_name'])}\n"
-            message += f"🔗 [Ссылка на обмен]({details['url']})\n\n"
-            message += f"📦 *Предлагают:* {offered_count} карт\n"
-            for card in details['offered_cards']:
-                message += f"  • [Карта]({card['url']})\n"
-            message += f"\n📤 *Вы отдаёте:* {required_count} карт\n"
-            for card in details['required_cards']:
-                message += f"  • [Карта]({card['url']})\n"
-            message += f"\n{result_msg}"
+                message = f"🔄 **Новое предложение обмена**\n\n"
+                message += f"👤 *Отправитель:* {html.escape(details['sender_name'])}\n"
+                message += f"🔗 [Ссылка на обмен]({details['url']})\n\n"
+                message += f"📦 *Предлагают:* {offered_count} карт\n"
+                for card in details['offered_cards']:
+                    message += f"  • [Карта]({card['url']})\n"
+                message += f"\n📤 *Вы отдаёте:* {required_count} карт\n"
+                for card in details['required_cards']:
+                    message += f"  • [Карта]({card['url']})\n"
+                message += f"\n{result_msg}"
 
-            bot.send_message(chat_id, message, parse_mode='Markdown', disable_web_page_preview=True)
+                try:
+                    bot.send_message(chat_id, message, parse_mode='Markdown', disable_web_page_preview=True)
+                except Exception as e:
+                    print(f"Ошибка отправки: {e}")
+
+            for _ in range(CHECK_INTERVAL):
+                if not monitoring_active:
+                    break
+                time.sleep(1)
         except Exception as e:
-            logger.exception(f"Ошибка обработки трейда {trade['trade_id']}: {e}")
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        while monitoring_active:
-            try:
-                trades = get_trades(auth)
-                # Определяем новые трейды
-                with processed_lock:
-                    new_trades = [t for t in trades if t['trade_id'] not in processed_trades]
-                    if new_trades:
-                        for trade in new_trades:
-                            processed_trades.add(trade['trade_id'])
-                        save_processed_trades()
-                if new_trades:
-                    logger.info(f"Найдено новых трейдов: {len(new_trades)}: {[t['trade_id'] for t in new_trades]}")
-                    futures = []
-                    for trade in new_trades:
-                        auth_copy = get_auth_for_user(chat_id)
-                        futures.append(executor.submit(process_one_trade, trade, auth_copy, chat_id))
-                    for f in concurrent.futures.as_completed(futures):
-                        pass  # можно проверить исключения, если нужно
-                else:
-                    logger.debug("Новых трейдов не найдено")
-                # Ожидание с возможностью досрочного выхода
-                for _ in range(CHECK_INTERVAL):
-                    if not monitoring_active:
-                        break
-                    time.sleep(1)
-            except Exception as e:
-                logger.exception(f"Ошибка в основном цикле мониторинга: {e}")
-                time.sleep(10)
+            print(f"[TRADE-MONITOR] Ошибка: {e}")
+            time.sleep(10)
 
     bot.send_message(chat_id, "🔕 Мониторинг обменов остановлен.")
-    logger.info(f"Мониторинг для чата {chat_id} остановлен")
 
 # ==================== КОМАНДЫ БОТА ====================
 @bot.message_handler(commands=['start'])
@@ -579,8 +499,9 @@ def run_bot():
             print("✅ Торговый бот запущен. Нажмите Ctrl+C для остановки.")
             bot.infinity_polling(timeout=60, long_polling_timeout=60)
         except Exception as e:
-            logger.error(f"Ошибка соединения: {e}. Переподключение через 10 секунд...")
+            print(f"❌ Ошибка соединения: {e}. Переподключение через 10 секунд...")
             time.sleep(10)
 
 if __name__ == '__main__':
-    run_bot()
+    run_bot() 
+    
