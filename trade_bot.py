@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Telegram бот для автоматического принятия выгодных обменов на mangabuff.ru
-Принимает предложения, где вы отдаёте 1 карту, а получаете 2 и более (2:1, 3:1, 4:1, ...)
+Принимает предложения, где вы отдаёте 1 карту, а получаете 2 и более (2:1, 3:1, ...)
+С параллельной обработкой нескольких трейдов одновременно.
 """
 
 import os
@@ -11,6 +12,7 @@ import re
 import time
 import threading
 import html
+import concurrent.futures
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -142,7 +144,7 @@ class MangaBuffAuth:
         resp = self.session.get(f'{self.BASE_URL}/')
         if resp.status_code != 200:
             return None
-        match = re.search(r'data-userid="(\d+)"', resp.text)
+        match = re.search(r'data-userid="\d+"', resp.text)
         if not match:
             match = re.search(r'/users/(\d+)', resp.text)
         return match.group(1) if match else None
@@ -227,7 +229,6 @@ def get_trade_details(auth: MangaBuffAuth, trade_id: str):
     }
 
 def accept_trade(auth: MangaBuffAuth, trade_id: str):
-    """Принимает обмен, отправляя POST-запрос. Считает успехом любой не-ошибочный ответ."""
     csrf = auth._get_csrf_from_cookies()
     if not csrf:
         return False, "CSRF token not found"
@@ -256,7 +257,7 @@ def accept_trade(auth: MangaBuffAuth, trade_id: str):
                 except:
                     pass
                 return True, "Обмен успешно принят!"
-        except Exception as e:
+        except Exception:
             continue
     
     return False, "Не удалось принять обмен. Возможно, сайт использует другой метод."
@@ -267,12 +268,13 @@ if not BOT_TOKEN:
     print("❌ Не найден TRADE_BOT_TOKEN или BOT_TOKEN в .env файле")
     sys.exit(1)
 
-CHECK_INTERVAL = 30
+CHECK_INTERVAL = 10          # Ускорено с 30 до 10 секунд
 SESSIONS_FILE = Path(__file__).parent / "tg_sessions.json"
 PROCESSED_TRADES_FILE = Path(__file__).parent / "processed_trades.json"
 
 sessions = {}
 processed_trades = set()
+processed_lock = threading.Lock()   # Блокировка для безопасной работы с processed_trades
 monitoring_active = False
 monitoring_thread = None
 
@@ -297,7 +299,8 @@ def load_processed_trades():
             processed_trades = set()
 
 def save_processed_trades():
-    data = {"trades": list(processed_trades)}
+    with processed_lock:
+        data = {"trades": list(processed_trades)}
     PROCESSED_TRADES_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 load_sessions()
@@ -330,7 +333,7 @@ def get_keyboard():
     )
     return markup
 
-# ==================== МОНИТОРИНГ ====================
+# ==================== ПАРАЛЛЕЛЬНЫЙ МОНИТОРИНГ ====================
 def monitoring_loop(chat_id):
     global monitoring_active
     print(f"[TRADE-MONITOR] Запуск для чата {chat_id}")
@@ -340,66 +343,82 @@ def monitoring_loop(chat_id):
         monitoring_active = False
         return
 
-    # Изменён текст при запуске мониторинга
     bot.send_message(chat_id, f"🔁 Мониторинг обменов запущен. Проверка каждые {CHECK_INTERVAL} сек.\nПринимаются обмены, где вы отдаёте 1 карту, а получаете 2 и более (2:1, 3:1, ...).")
 
-    while monitoring_active:
+    def process_one_trade(trade, auth_copy, chat_id):
+        """Обработка одного трейда в отдельном потоке"""
         try:
-            trades = get_trades(auth)
-            new_trades = [t for t in trades if t['trade_id'] not in processed_trades]
-            for trade in new_trades:
-                processed_trades.add(trade['trade_id'])
-                save_processed_trades()
+            details = get_trade_details(auth_copy, trade['trade_id'])
+            if not details:
+                return
 
-                details = get_trade_details(auth, trade['trade_id'])
-                if not details:
-                    continue
+            offered_count = len(details['offered_cards'])
+            required_count = len(details['required_cards'])
 
-                offered_count = len(details['offered_cards'])
-                required_count = len(details['required_cards'])
-
-                # НОВОЕ УСЛОВИЕ: отдаём 1 карту, получаем 2 и более
-                accept = (required_count == 1 and offered_count >= 2)
-                result_msg = ""
-                if accept:
-                    success, msg = accept_trade(auth, trade['trade_id'])
-                    if success:
-                        result_msg = "✅ **Обмен автоматически ПРИНЯТ!**"
-                    else:
-                        result_msg = f"❌ **Не удалось принять обмен**: {msg}"
+            accept = (required_count == 1 and offered_count >= 2)
+            result_msg = ""
+            if accept:
+                success, msg = accept_trade(auth_copy, trade['trade_id'])
+                if success:
+                    result_msg = "✅ **Обмен автоматически ПРИНЯТ!**"
                 else:
-                    # Причина отказа поясняется
-                    if required_count != 1:
-                        reason = f"вы отдаёте {required_count} карт (нужно ровно 1)"
-                    elif offered_count < 2:
-                        reason = f"вам предлагают только {offered_count} карт (нужно 2 и более)"
-                    else:
-                        reason = "неподходящие условия"
-                    result_msg = f"⏩ **Обмен проигнорирован** ({offered_count}:{required_count}) – {reason}"
+                    result_msg = f"❌ **Не удалось принять обмен**: {msg}"
+            else:
+                if required_count != 1:
+                    reason = f"вы отдаёте {required_count} карт (нужно ровно 1)"
+                elif offered_count < 2:
+                    reason = f"вам предлагают только {offered_count} карт (нужно 2 и более)"
+                else:
+                    reason = "неподходящие условия"
+                result_msg = f"⏩ **Обмен проигнорирован** ({offered_count}:{required_count}) – {reason}"
 
-                message = f"🔄 **Новое предложение обмена**\n\n"
-                message += f"👤 *Отправитель:* {html.escape(details['sender_name'])}\n"
-                message += f"🔗 [Ссылка на обмен]({details['url']})\n\n"
-                message += f"📦 *Предлагают:* {offered_count} карт\n"
-                for card in details['offered_cards']:
-                    message += f"  • [Карта]({card['url']})\n"
-                message += f"\n📤 *Вы отдаёте:* {required_count} карт\n"
-                for card in details['required_cards']:
-                    message += f"  • [Карта]({card['url']})\n"
-                message += f"\n{result_msg}"
+            message = f"🔄 **Новое предложение обмена**\n\n"
+            message += f"👤 *Отправитель:* {html.escape(details['sender_name'])}\n"
+            message += f"🔗 [Ссылка на обмен]({details['url']})\n\n"
+            message += f"📦 *Предлагают:* {offered_count} карт\n"
+            for card in details['offered_cards']:
+                message += f"  • [Карта]({card['url']})\n"
+            message += f"\n📤 *Вы отдаёте:* {required_count} карт\n"
+            for card in details['required_cards']:
+                message += f"  • [Карта]({card['url']})\n"
+            message += f"\n{result_msg}"
 
-                try:
-                    bot.send_message(chat_id, message, parse_mode='Markdown', disable_web_page_preview=True)
-                except Exception as e:
-                    print(f"Ошибка отправки: {e}")
-
-            for _ in range(CHECK_INTERVAL):
-                if not monitoring_active:
-                    break
-                time.sleep(1)
+            bot.send_message(chat_id, message, parse_mode='Markdown', disable_web_page_preview=True)
         except Exception as e:
-            print(f"[TRADE-MONITOR] Ошибка: {e}")
-            time.sleep(10)
+            print(f"[ERROR] Обработка трейда {trade['trade_id']}: {e}")
+
+    # Пул потоков для параллельной обработки (до 5 одновременно)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        while monitoring_active:
+            try:
+                trades = get_trades(auth)
+                # Определяем новые трейды (блокировка только на чтение processed_trades)
+                with processed_lock:
+                    new_trades = [t for t in trades if t['trade_id'] not in processed_trades]
+                    if new_trades:
+                        for trade in new_trades:
+                            processed_trades.add(trade['trade_id'])
+                        # Сохраняем после добавления всех новых
+                        save_processed_trades()
+
+                if new_trades:
+                    futures = []
+                    for trade in new_trades:
+                        # Для потокобезопасности создаём отдельную копию авторизации (с теми же cookies)
+                        auth_copy = get_auth_for_user(chat_id)
+                        futures.append(executor.submit(process_one_trade, trade, auth_copy, chat_id))
+                    # Ожидаем завершения всех задач (необязательно, но чтобы не перегружать)
+                    for f in concurrent.futures.as_completed(futures):
+                        pass
+
+                # Ожидание с возможностью досрочного выхода
+                for _ in range(CHECK_INTERVAL):
+                    if not monitoring_active:
+                        break
+                    time.sleep(1)
+            except Exception as e:
+                print(f"[TRADE-MONITOR] Ошибка в основном цикле: {e}")
+                time.sleep(10)
 
     bot.send_message(chat_id, "🔕 Мониторинг обменов остановлен.")
 
