@@ -226,40 +226,53 @@ def get_trade_details(auth: MangaBuffAuth, trade_id: str):
         'url': f"{auth.BASE_URL}/trades/{trade_id}"
     }
 
-def accept_trade(auth: MangaBuffAuth, trade_id: str):
-    """Принимает обмен, отправляя POST-запрос. Считает успехом любой не-ошибочный ответ."""
-    csrf = auth._get_csrf_from_cookies()
-    if not csrf:
-        return False, "CSRF token not found"
-    
-    headers = {
-        'X-XSRF-TOKEN': csrf,
-        'X-Requested-With': 'XMLHttpRequest',
-        'Referer': f"{auth.BASE_URL}/trades/{trade_id}",
-        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-    }
-    
-    endpoints = [
-        f"{auth.BASE_URL}/trades/accept",
-        f"{auth.BASE_URL}/trades/accept/{trade_id}",
-        f"{auth.BASE_URL}/trades/{trade_id}/accept",
-    ]
-    
-    for endpoint in endpoints:
-        try:
-            resp = auth.session.post(endpoint, headers=headers, data={'trade_id': trade_id})
-            if resp.status_code < 400:
-                try:
-                    data = resp.json()
-                    if data.get('error'):
-                        continue
-                except:
-                    pass
-                return True, "Обмен успешно принят!"
-        except Exception as e:
+def accept_trade(auth: MangaBuffAuth, trade_id: str, max_retries: int = 3):
+    """
+    Принимает обмен с повторными попытками при ошибке
+    max_retries - максимальное количество попыток (по умолчанию 3)
+    """
+    for attempt in range(max_retries):
+        if attempt > 0:
+            print(f"[RETRY] Попытка {attempt + 1}/{max_retries} для обмена {trade_id}")
+            time.sleep(10)  # Ждём 10 секунд перед повторной попыткой
+        
+        csrf = auth._get_csrf_from_cookies()
+        if not csrf:
+            if attempt == max_retries - 1:
+                return False, "CSRF token not found"
             continue
+        
+        headers = {
+            'X-XSRF-TOKEN': csrf,
+            'X-Requested-With': 'XMLHttpRequest',
+            'Referer': f"{auth.BASE_URL}/trades/{trade_id}",
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        }
+        
+        endpoints = [
+            f"{auth.BASE_URL}/trades/accept",
+            f"{auth.BASE_URL}/trades/accept/{trade_id}",
+            f"{auth.BASE_URL}/trades/{trade_id}/accept",
+        ]
+        
+        for endpoint in endpoints:
+            try:
+                resp = auth.session.post(endpoint, headers=headers, data={'trade_id': trade_id})
+                if resp.status_code < 400:
+                    try:
+                        data = resp.json()
+                        if data.get('error'):
+                            continue
+                    except:
+                        pass
+                    return True, "Обмен успешно принят!"
+            except Exception as e:
+                continue
+        
+        if attempt == max_retries - 1:
+            return False, f"Не удалось принять обмен после {max_retries} попыток"
     
-    return False, "Не удалось принять обмен. Возможно, сайт использует другой метод."
+    return False, "Не удалось принять обмен"
 
 # ==================== НАСТРОЙКИ БОТА ====================
 BOT_TOKEN = os.getenv("TRADE_BOT_TOKEN") or os.getenv("BOT_TOKEN")
@@ -362,11 +375,11 @@ def monitoring_loop(chat_id):
                 accept = (required_count == 1 and offered_count >= 2)
                 result_msg = ""
                 if accept:
-                    success, msg = accept_trade(auth, trade['trade_id'])
+                    success, msg = accept_trade(auth, trade['trade_id'], max_retries=3)
                     if success:
                         result_msg = "✅ **Обмен автоматически ПРИНЯТ!**"
                     else:
-                        result_msg = f"❌ **Не удалось принять обмен**: {msg}"
+                        result_msg = f"❌ **Не удалось принять обмен после 3 попыток**: {msg}"
                 else:
                     # Причина отказа поясняется
                     if required_count != 1:
@@ -503,5 +516,4 @@ def run_bot():
             time.sleep(10)
 
 if __name__ == '__main__':
-    run_bot() 
-    
+    run_bot()
