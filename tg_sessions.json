@@ -1,38 +1,46 @@
 {
   "632688088": {
-    "user_id": "465158",
+    "user_id": "1421419",
     "cookies": [
       {
         "name": "__ddg8_",
-        "value": "XTOWBhAJeqxsRyWR"
+        "value": "joZBsfzuI7Rl90Ff",
+        "domain": "mangabuff.ru"
       },
       {
         "name": "__ddg10_",
-        "value": "1777190399"
+        "value": "1778481496",
+        "domain": "mangabuff.ru"
       },
       {
         "name": "__ddg9_",
-        "value": "37.214.70.29"
+        "value": "93.125.104.182",
+        "domain": "mangabuff.ru"
       },
       {
         "name": "__ddg1_",
-        "value": "zZRQ1VjDHtWBVksMMqjR"
+        "value": "KpyHohvoALBxTpPNGcdV",
+        "domain": "mangabuff.ru"
       },
       {
         "name": "XSRF-TOKEN",
-        "value": "eyJpdiI6Ik5JcDhZRGhsSExTU3c4aXIrcllGNHc9PSIsInZhbHVlIjoibjRrZGlTWTd0YjR2V1FwT1JjUDM0L3lhdFNIRldLcGtTOUVjcUxvazJReTVuWjRhWGpPOHkxQ2xWZnhib095dGRlNU01ZXdJWWp6and3MG1JMGJWOWhrek5kTVRIQ1M1SVZ5blBHOG8rZk8wNlZreGNJaHVQOEozbS9JeTJ4VW0iLCJtYWMiOiI1NzI4MTAzOTQzZTZmY2QwZTMyM2JlOGZmZWEyMTNhZjY1MTkyNzJmN2VjMzMxN2YyZmQ0MDg0MTlkYjA2N2I5IiwidGFnIjoiIn0%3D"
+        "value": "eyJpdiI6IlYrRS9qSjd0dE9Ma1BPcGhzTEphWHc9PSIsInZhbHVlIjoiN2ErWUpYOEt4ZzNiVUc5NzluWktiZWJ6T3JET25xOE1uaWVvWHpJejBJVDhXQUJXZzd5NW1YMEthUFJoWlhSRGliQmEzcW9wTy94UTFXRUx3Sm96RTJ1c3Btdi93WlJnR05kNmxBR0c3MWpPSzF0M2ZTS1Y0dmpWeU5ZRm1CekEiLCJtYWMiOiJkMjEyMGM1YzZhZDc0OTE5YjA5ZjVkZjJiYzIxMDdmYjk0MGNlZDZjZWM5ZDBhYzUwMWZmOTc3MmNhZDc2NjhmIiwidGFnIjoiIn0%3D",
+        "domain": "mangabuff.ru"
       },
       {
         "name": "mangabuff_session",
-        "value": "eyJpdiI6IlE1aFRueUZFYlB5VTJTc3oyVWcvMFE9PSIsInZhbHVlIjoicWRFeThrc1YzK25uRXdESFZpaXpWTVppVCt2VE40L3I2bjFPR0RVcWdUdk80LzVaSWo4Z0MyQ2dLRHAvR2g0R0M4clJuVGZrMUFkUXMwbHZuc3RQK21xOWR2WFE1U3h1MW10QlNPdW8rMlZvNXEzbkVleEs4Vi9kN3hBQkpWTDciLCJtYWMiOiI1ZDUxYTljYTc2ZDQ3MDg0N2YyMjk3OWRiYTNlNDU4NzZiNTE5ODAwYTNiNWNiNDU4MmM2OWYxNmUzMTkwZTcyIiwidGFnIjoiIn0%3D"
+        "value": "eyJpdiI6IitCR0pFOUsySm5aMHo3UTVJREdhMWc9PSIsInZhbHVlIjoiQVdQMGpsdkNWK2xpQzdobGE3MVNHaXNxZlJ2a0ZqbkVzUHdoZG01Sm9uU3ZLREcrMklSU2d6K3B6bzluN1RFaXZpVVIzc3l5R0tkZFBuVVlXNVdSOFNhdEEzdm5YOUZCZUpGQkxKdFNoUWFXTkRxV0tSOWNDd0kzTFFWSU8wYnkiLCJtYWMiOiJlNzc2MWI4YTRmOGI5MDY0NTlmNmRjNTI4YzNhMzY1NGVjNWM4MzhlM2QzZTdhMjZlZDMxZmNiMjRmMzQzNmI1IiwidGFnIjoiIn0%3D",
+        "domain": "mangabuff.ru"
       },
       {
         "name": "last-chapter-id",
-        "value": "c5a57643-ce56-4187-91ba-e86ace156e4d"
+        "value": "c5a57643-ce56-4187-91ba-e86ace156e4d",
+        "domain": "mangabuff.ru"
       },
       {
         "name": "remember_web_59ba36addc2b2f9401580f014c7f58ea4e30989d",
-        "value": "eyJpdiI6Ik5VSEZNMzVYQWY1OGFyNE0zN3d2bGc9PSIsInZhbHVlIjoia0dXandwUFVHSDZSZ1pERTdIaGUraUJYYnBKYUJTK2NkSXBreUEvL0cxQ2lucCtldXc0bEpjRTRqZ0o3enloQUlSNHhHOFFzSTZzNEkvUFBPQm1qc3hoSTgrY1NJSVRld21iNExtYVZveTFVdGdjcjlUR29oZW9vWjdkM3BwL01TMXFScFBiZ2U4Y1RTaWRXelAzRmhPcU9kQjE5d05Zd0txb1A4WmRiSmdkSHVsQ2VYQnZQWVZpN2FiOGdKVlYwQkczWXEvc3IwWDVoaVZ0MGlwcnFzUnJqK2t1RC91cDNoOHBIVExPSVN0RT0iLCJtYWMiOiIwZTcyZjRlYjE3YzdiNGIxMzQzNTA0NzIwNzFhYWVjOGEzYjM0NjRhYzNmMTZmMTc4MjU0OGY0MWFmNDFhYTJlIiwidGFnIjoiIn0%3D"
+        "value": "eyJpdiI6InkrTXF2TnJlb0JkWTNqS0dmdm5KOEE9PSIsInZhbHVlIjoiZGwySVR1WFpNU1dpNHJsdW81QTNRU3p6OUx4OVdzclZwVWtkOE5pYURYVFRPY204cVVncm5DSlZHUEtBaGpJNVhjWVlXRHpJdFZrNGZSN2JiS3ZqbDFEdC9lY241UzdtQ2V4SDhCTjVpazkrNE02MHg1UC9tdy93ZStxVXp5QjczVmdLczFSU1I4S1JIekVPenk3RXdsQkFjQ3k5UlB2ZVZJMEEvbGQ0Q1B3dy93eDUycnViT3BEUjh6RVZvK3BEVDJKMDEvSmZvVnBvcmhQamMxY0hCZ0NSZHVmZ1ZKVkxlNmV3Z3pGejNWbz0iLCJtYWMiOiI5ZDNlMjZiZjBiODAxZmNjZGU5NTUzM2E4YmM4MzY5N2E2YzYzODhlOWY2M2ZjYmE5MGNlNzQ5ZThiMTUxMDE4IiwidGFnIjoiIn0%3D",
+        "domain": "mangabuff.ru"
       }
     ]
   }
