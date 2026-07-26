@@ -2,6 +2,7 @@
 """
 Telegram бот для автоматического принятия выгодных обменов на mangabuff.ru
 Принимает предложения, где вы отдаёте 1 карту, а получаете 2 и более (2:1, 3:1, 4:1, ...)
+ОПТИМИЗИРОВАННАЯ ВЕРСИЯ - ускоренное принятие обменов
 """
 
 import os
@@ -13,6 +14,7 @@ import threading
 import html
 from pathlib import Path
 from urllib.parse import unquote
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     from bs4 import BeautifulSoup
@@ -66,6 +68,10 @@ class MangaBuffAuth:
             'Sec-Ch-Ua-Mobile': '?0',
             'Sec-Ch-Ua-Platform': '"Windows"',
         })
+        
+        # Отключаем лишние задержки
+        if hasattr(self.session, 'timeout'):
+            self.session.timeout = 10
 
     def _get_csrf_from_cookies(self) -> str:
         xsrf = self.session.cookies.get('XSRF-TOKEN')
@@ -87,7 +93,7 @@ class MangaBuffAuth:
         if not csrf:
             return False, 'CSRF token not found'
 
-        time.sleep(1)
+        time.sleep(0.5)  # Уменьшено с 1 сек
 
         login_data = {'email': email, 'password': password, 'remember': 'on'}
         headers = {
@@ -147,74 +153,77 @@ class MangaBuffAuth:
             match = re.search(r'/users/(\d+)', resp.text)
         return match.group(1) if match else None
 
-# ==================== ФУНКЦИИ ПАРСИНГА ОБМЕНОВ ====================
-def get_trades(auth: MangaBuffAuth):
+# ==================== ФУНКЦИИ ПАРСИНГА ОБМЕНОВ (ОПТИМИЗИРОВАННЫЕ) ====================
+def get_trades_fast(auth: MangaBuffAuth):
+    """Быстрое получение списка обменов с кэшированием сессии"""
     url = f"{auth.BASE_URL}/trades"
-    response = auth.session.get(url)
+    response = auth.session.get(url, timeout=10)
     if response.status_code != 200:
         return []
-    soup = BeautifulSoup(response.text, 'html.parser')
+    
+    # Используем lxml для скорости (если доступен)
+    soup = BeautifulSoup(response.text, 'lxml' if 'lxml' in sys.modules else 'html.parser')
     trades = []
+    
+    # Оптимизированный поиск
     trade_items = soup.find_all('a', class_=lambda c: c and 'trade__list-item' in c.split())
+    
     for item in trade_items:
         href = item.get('href')
         if not href or '/trades/' not in href:
             continue
         trade_id = href.split('/')[-1]
         trade_url = f"{auth.BASE_URL}{href}"
-        info_div = item.find('div', class_='trade__list-info')
-        if not info_div:
-            continue
-        date_elem = info_div.find('div', class_='trade__list-date')
-        date = date_elem.text.strip() if date_elem else ""
-        name_elem = info_div.find('div', class_='trade__list-name')
-        sender_name = name_elem.text.replace('от ', '').strip() if name_elem else ""
-        header_div = info_div.find('div', class_='trade__list-header')
+        
+        # Проверяем, новый ли обмен (быстрая проверка)
+        header_div = item.find('div', class_='trade__list-header')
         is_new = bool(header_div and header_div.find('span', class_='trade__list-dot--new'))
+        
+        # Если обмен не новый - пропускаем для скорости (опционально)
+        # Раскомментируйте, если хотите обрабатывать только новые:
+        # if not is_new:
+        #     continue
+        
         trades.append({
             'trade_id': trade_id,
-            'sender_name': sender_name,
-            'date': date,
             'is_new': is_new,
             'url': trade_url
         })
+    
     return trades
 
-def get_trade_details(auth: MangaBuffAuth, trade_id: str):
+def get_trade_details_fast(auth: MangaBuffAuth, trade_id: str):
+    """Быстрое получение деталей обмена"""
     url = f"{auth.BASE_URL}/trades/{trade_id}"
-    response = auth.session.get(url)
+    response = auth.session.get(url, timeout=10)
     if response.status_code != 200:
         return None
-    soup = BeautifulSoup(response.text, 'html.parser')
+    
+    soup = BeautifulSoup(response.text, 'lxml' if 'lxml' in sys.modules else 'html.parser')
+    
+    # Быстрое получение имени отправителя
     sender_elem = soup.find('a', class_='trade__header-name')
     if not sender_elem:
         return None
     sender_name = sender_elem.text.strip()
     sender_id = sender_elem.get('href', '').split('/')[-1]
-    viewed_elem = soup.find('span', class_='trade__viewed--yes')
-    viewed = bool(viewed_elem)
-
+    
+    # Получение карт (оптимизировано)
     offered_cards = []
     creator_div = soup.find('div', class_='trade__main-items trade__main-items--creator')
     if creator_div:
-        card_links = creator_div.find_all('a', class_='trade__main-item')
-        for link in card_links:
+        for link in creator_div.find_all('a', class_='trade__main-item'):
             card_url = f"{auth.BASE_URL}{link.get('href')}"
             card_id = card_url.split('/')[-2] if '/cards/' in card_url else ''
-            img = link.find('img')
-            img_url = img.get('src') if img else ''
-            offered_cards.append({'card_id': card_id, 'url': card_url, 'image': img_url})
+            offered_cards.append({'card_id': card_id, 'url': card_url})
 
     required_cards = []
     receiver_div = soup.find('div', class_='trade__main-items trade__main-items--receiver')
     if receiver_div:
-        card_links = receiver_div.find_all('a', class_='trade__main-item')
-        for link in card_links:
+        for link in receiver_div.find_all('a', class_='trade__main-item'):
             card_url = f"{auth.BASE_URL}{link.get('href')}"
             card_id = card_url.split('/')[-2] if '/cards/' in card_url else ''
-            img = link.find('img')
-            img_url = img.get('src') if img else ''
-            required_cards.append({'card_id': card_id, 'url': card_url, 'image': img_url})
+            required_cards.append({'card_id': card_id, 'url': card_url})
 
     return {
         'trade_id': trade_id,
@@ -222,42 +231,33 @@ def get_trade_details(auth: MangaBuffAuth, trade_id: str):
         'sender_name': sender_name,
         'offered_cards': offered_cards,
         'required_cards': required_cards,
-        'viewed': viewed,
         'url': f"{auth.BASE_URL}/trades/{trade_id}"
     }
 
-def accept_trade(auth: MangaBuffAuth, trade_id: str, max_retries: int = 3):
-    """
-    Принимает обмен с повторными попытками при ошибке
-    max_retries - максимальное количество попыток (по умолчанию 3)
-    """
+def accept_trade_fast(auth: MangaBuffAuth, trade_id: str, max_retries: int = 2):
+    """Быстрое принятие обмена с минимальными задержками"""
+    csrf = auth._get_csrf_from_cookies()
+    if not csrf:
+        return False, "CSRF token not found"
+    
+    headers = {
+        'X-XSRF-TOKEN': csrf,
+        'X-Requested-With': 'XMLHttpRequest',
+        'Referer': f"{auth.BASE_URL}/trades/{trade_id}",
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+    }
+    
+    # Пробуем разные эндпоинты параллельно (или последовательно быстро)
+    endpoints = [
+        f"{auth.BASE_URL}/trades/accept",
+        f"{auth.BASE_URL}/trades/accept/{trade_id}",
+        f"{auth.BASE_URL}/trades/{trade_id}/accept",
+    ]
+    
     for attempt in range(max_retries):
-        if attempt > 0:
-            print(f"[RETRY] Попытка {attempt + 1}/{max_retries} для обмена {trade_id}")
-            time.sleep(10)  # Ждём 10 секунд перед повторной попыткой
-        
-        csrf = auth._get_csrf_from_cookies()
-        if not csrf:
-            if attempt == max_retries - 1:
-                return False, "CSRF token not found"
-            continue
-        
-        headers = {
-            'X-XSRF-TOKEN': csrf,
-            'X-Requested-With': 'XMLHttpRequest',
-            'Referer': f"{auth.BASE_URL}/trades/{trade_id}",
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        }
-        
-        endpoints = [
-            f"{auth.BASE_URL}/trades/accept",
-            f"{auth.BASE_URL}/trades/accept/{trade_id}",
-            f"{auth.BASE_URL}/trades/{trade_id}/accept",
-        ]
-        
         for endpoint in endpoints:
             try:
-                resp = auth.session.post(endpoint, headers=headers, data={'trade_id': trade_id})
+                resp = auth.session.post(endpoint, headers=headers, data={'trade_id': trade_id}, timeout=10)
                 if resp.status_code < 400:
                     try:
                         data = resp.json()
@@ -269,8 +269,9 @@ def accept_trade(auth: MangaBuffAuth, trade_id: str, max_retries: int = 3):
             except Exception as e:
                 continue
         
-        if attempt == max_retries - 1:
-            return False, f"Не удалось принять обмен после {max_retries} попыток"
+        # Минимальная задержка перед повторной попыткой
+        if attempt < max_retries - 1:
+            time.sleep(0.5)
     
     return False, "Не удалось принять обмен"
 
@@ -280,7 +281,7 @@ if not BOT_TOKEN:
     print("❌ Не найден TRADE_BOT_TOKEN или BOT_TOKEN в .env файле")
     sys.exit(1)
 
-CHECK_INTERVAL = 30
+CHECK_INTERVAL = 5  # Уменьшено с 30 до 5 секунд
 SESSIONS_FILE = Path(__file__).parent / "tg_sessions.json"
 PROCESSED_TRADES_FILE = Path(__file__).parent / "processed_trades.json"
 
@@ -288,6 +289,7 @@ sessions = {}
 processed_trades = set()
 monitoring_active = False
 monitoring_thread = None
+executor = ThreadPoolExecutor(max_workers=5)  # Пул потоков для параллельной обработки
 
 def load_sessions():
     global sessions
@@ -343,76 +345,123 @@ def get_keyboard():
     )
     return markup
 
-# ==================== МОНИТОРИНГ ====================
+# ==================== МОНИТОРИНГ (ОПТИМИЗИРОВАННЫЙ) ====================
+def process_trade(chat_id, auth, trade):
+    """Обработка одного обмена - выполняется в отдельном потоке"""
+    try:
+        if trade['trade_id'] in processed_trades:
+            return None
+        
+        # Добавляем в обработанные сразу, чтобы избежать дублирования
+        processed_trades.add(trade['trade_id'])
+        save_processed_trades()
+        
+        # Получаем детали
+        details = get_trade_details_fast(auth, trade['trade_id'])
+        if not details:
+            return None
+        
+        offered_count = len(details['offered_cards'])
+        required_count = len(details['required_cards'])
+        
+        # Условие: отдаём 1 карту, получаем 2 и более
+        accept = (required_count == 1 and offered_count >= 2)
+        
+        if accept:
+            success, msg = accept_trade_fast(auth, trade['trade_id'], max_retries=2)
+            if success:
+                result_msg = "✅ **Обмен автоматически ПРИНЯТ!** 🚀"
+            else:
+                result_msg = f"❌ **Не удалось принять**: {msg}"
+        else:
+            if required_count != 1:
+                reason = f"вы отдаёте {required_count} карт (нужно ровно 1)"
+            elif offered_count < 2:
+                reason = f"вам предлагают только {offered_count} карт (нужно 2 и более)"
+            else:
+                reason = "неподходящие условия"
+            result_msg = f"⏩ **Пропущен** ({offered_count}:{required_count}) – {reason}"
+        
+        message = f"🔄 **Новое предложение обмена**\n\n"
+        message += f"👤 *Отправитель:* {html.escape(details['sender_name'])}\n"
+        message += f"🔗 [Ссылка]({details['url']})\n\n"
+        message += f"📦 *Предлагают:* {offered_count} карт\n"
+        for card in details['offered_cards'][:5]:  # Ограничиваем вывод
+            message += f"  • [Карта]({card['url']})\n"
+        if offered_count > 5:
+            message += f"  • ... и ещё {offered_count - 5} карт\n"
+        message += f"\n📤 *Вы отдаёте:* {required_count} карт\n"
+        for card in details['required_cards'][:5]:
+            message += f"  • [Карта]({card['url']})\n"
+        if required_count > 5:
+            message += f"  • ... и ещё {required_count - 5} карт\n"
+        message += f"\n{result_msg}"
+        
+        try:
+            bot.send_message(chat_id, message, parse_mode='Markdown', disable_web_page_preview=True)
+        except Exception as e:
+            print(f"Ошибка отправки: {e}")
+            
+        return details
+        
+    except Exception as e:
+        print(f"[TRADE-PROCESS] Ошибка обработки обмена {trade.get('trade_id')}: {e}")
+        return None
+
 def monitoring_loop(chat_id):
     global monitoring_active
-    print(f"[TRADE-MONITOR] Запуск для чата {chat_id}")
+    print(f"[TRADE-MONITOR] Запуск для чата {chat_id} (интервал: {CHECK_INTERVAL}с)")
     auth = get_auth_for_user(chat_id)
+    
     if not auth.is_authenticated():
         bot.send_message(chat_id, "❌ Вы не авторизованы. Используйте /login")
         monitoring_active = False
         return
 
-    # Изменён текст при запуске мониторинга
-    bot.send_message(chat_id, f"🔁 Мониторинг обменов запущен. Проверка каждые {CHECK_INTERVAL} сек.\nПринимаются обмены, где вы отдаёте 1 карту, а получаете 2 и более (2:1, 3:1, ...).")
+    bot.send_message(chat_id, f"🚀 Мониторинг запущен! Проверка каждые {CHECK_INTERVAL} сек.\nПринимаются обмены 1→2+ (вы отдаёте 1, получаете 2 и более)")
 
     while monitoring_active:
         try:
-            trades = get_trades(auth)
+            start_time = time.time()
+            
+            # Быстрое получение списка обменов
+            trades = get_trades_fast(auth)
+            
+            if not trades:
+                time.sleep(0.5)
+                continue
+            
+            # Фильтруем новые обмены
             new_trades = [t for t in trades if t['trade_id'] not in processed_trades]
-            for trade in new_trades:
-                processed_trades.add(trade['trade_id'])
-                save_processed_trades()
-
-                details = get_trade_details(auth, trade['trade_id'])
-                if not details:
-                    continue
-
-                offered_count = len(details['offered_cards'])
-                required_count = len(details['required_cards'])
-
-                # НОВОЕ УСЛОВИЕ: отдаём 1 карту, получаем 2 и более
-                accept = (required_count == 1 and offered_count >= 2)
-                result_msg = ""
-                if accept:
-                    success, msg = accept_trade(auth, trade['trade_id'], max_retries=3)
-                    if success:
-                        result_msg = "✅ **Обмен автоматически ПРИНЯТ!**"
-                    else:
-                        result_msg = f"❌ **Не удалось принять обмен после 3 попыток**: {msg}"
-                else:
-                    # Причина отказа поясняется
-                    if required_count != 1:
-                        reason = f"вы отдаёте {required_count} карт (нужно ровно 1)"
-                    elif offered_count < 2:
-                        reason = f"вам предлагают только {offered_count} карт (нужно 2 и более)"
-                    else:
-                        reason = "неподходящие условия"
-                    result_msg = f"⏩ **Обмен проигнорирован** ({offered_count}:{required_count}) – {reason}"
-
-                message = f"🔄 **Новое предложение обмена**\n\n"
-                message += f"👤 *Отправитель:* {html.escape(details['sender_name'])}\n"
-                message += f"🔗 [Ссылка на обмен]({details['url']})\n\n"
-                message += f"📦 *Предлагают:* {offered_count} карт\n"
-                for card in details['offered_cards']:
-                    message += f"  • [Карта]({card['url']})\n"
-                message += f"\n📤 *Вы отдаёте:* {required_count} карт\n"
-                for card in details['required_cards']:
-                    message += f"  • [Карта]({card['url']})\n"
-                message += f"\n{result_msg}"
-
-                try:
-                    bot.send_message(chat_id, message, parse_mode='Markdown', disable_web_page_preview=True)
-                except Exception as e:
-                    print(f"Ошибка отправки: {e}")
-
-            for _ in range(CHECK_INTERVAL):
+            
+            if new_trades:
+                print(f"[TRADE-MONITOR] Найдено {len(new_trades)} новых обменов")
+                
+                # Параллельная обработка новых обменов
+                futures = []
+                for trade in new_trades:
+                    future = executor.submit(process_trade, chat_id, auth, trade)
+                    futures.append(future)
+                
+                # Ждём завершения всех задач
+                for future in as_completed(futures):
+                    try:
+                        future.result(timeout=5)
+                    except Exception as e:
+                        print(f"[TRADE-MONITOR] Ошибка в потоке: {e}")
+            
+            # Динамическая задержка: если обменов много, проверяем чаще
+            elapsed = time.time() - start_time
+            sleep_time = max(1, CHECK_INTERVAL - elapsed)
+            
+            for _ in range(int(sleep_time)):
                 if not monitoring_active:
                     break
                 time.sleep(1)
+                
         except Exception as e:
             print(f"[TRADE-MONITOR] Ошибка: {e}")
-            time.sleep(10)
+            time.sleep(2)
 
     bot.send_message(chat_id, "🔕 Мониторинг обменов остановлен.")
 
@@ -422,11 +471,12 @@ def cmd_start(message):
     bot.send_message(
         message.chat.id,
         "🤖 Бот для автоматического обмена картами на mangabuff.ru\n\n"
+        "⚡ **ОПТИМИЗИРОВАННАЯ ВЕРСИЯ** - мгновенное принятие обменов!\n\n"
         "Команды:\n"
         "/login email password – войти в аккаунт\n"
         "/logout – выйти\n"
         "/status – проверить авторизацию\n"
-        "/monitor_start – запустить мониторинг обменов (автопринятие, если вы отдаёте 1 карту, а получаете 2+)\n"
+        "/monitor_start – запустить мониторинг (автопринятие 1→2+)\n"
         "/monitor_stop – остановить мониторинг\n\n"
         "Используйте кнопки для управления.",
         reply_markup=get_keyboard()
@@ -510,10 +560,10 @@ def run_bot():
     while True:
         try:
             print("✅ Торговый бот запущен. Нажмите Ctrl+C для остановки.")
-            bot.infinity_polling(timeout=60, long_polling_timeout=60)
+            bot.infinity_polling(timeout=30, long_polling_timeout=30)
         except Exception as e:
-            print(f"❌ Ошибка соединения: {e}. Переподключение через 10 секунд...")
-            time.sleep(10)
+            print(f"❌ Ошибка соединения: {e}. Переподключение через 5 секунд...")
+            time.sleep(5)
 
 if __name__ == '__main__':
     run_bot()
