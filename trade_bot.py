@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 Telegram бот для автоматического принятия выгодных обменов на mangabuff.ru
-Принимает предложения, где вы отдаёте 1 карту, а получаете 2 и более (2:1, 3:1, 4:1, ...)
-ОПТИМИЗИРОВАННАЯ ВЕРСИЯ - ускоренное принятие обменов
+ФИНАЛЬНАЯ ВЕРСИЯ - правильная авторизация
 """
 
 import os
@@ -25,10 +24,10 @@ except ImportError:
 try:
     from curl_cffi.requests import Session as CffiSession
     USE_CURL_CFFI = True
+    print("✅ curl_cffi установлен")
 except ImportError:
-    import requests
-    USE_CURL_CFFI = False
-    print("[WARN] curl_cffi не установлен, используется requests. Возможны проблемы с Cloudflare.")
+    print("❌ Установите curl-cffi: pip install curl-cffi")
+    sys.exit(1)
 
 try:
     import telebot
@@ -50,193 +49,356 @@ class MangaBuffAuth:
 
     def __init__(self, proxy: dict = None, impersonate: str = "chrome131"):
         self.impersonate = impersonate
-        self._setup_session(proxy)
+        self.proxy = proxy
+        self._setup_session()
 
-    def _setup_session(self, proxy):
-        if USE_CURL_CFFI:
-            self.session = CffiSession(impersonate=self.impersonate)
-        else:
-            self.session = requests.Session()
-        if proxy:
-            self.session.proxies.update(proxy)
-
+    def _setup_session(self):
+        """Настройка сессии с полной имитацией браузера"""
+        self.session = CffiSession(
+            impersonate=self.impersonate,
+            timeout=30,
+            verify=True
+        )
+        
+        if self.proxy:
+            self.session.proxies.update(self.proxy)
+        
+        # Полные заголовки браузера
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.109 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
             'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Sec-Ch-Ua': '"Google Chrome";v="131", "Not_A Brand";v="8"',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Sec-Ch-Ua': '"Google Chrome";v="131", "Not_A_Brand";v="24", "Chromium";v="131"',
             'Sec-Ch-Ua-Mobile': '?0',
             'Sec-Ch-Ua-Platform': '"Windows"',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Upgrade-Insecure-Requests': '1',
+            'Cache-Control': 'max-age=0',
+            'Connection': 'keep-alive',
         })
-        
-        # Отключаем лишние задержки
-        if hasattr(self.session, 'timeout'):
-            self.session.timeout = 10
 
-    def _get_csrf_from_cookies(self) -> str:
+    def _get_csrf_token(self) -> str:
+        """Получение CSRF токена из кук"""
+        # Пробуем из кук XSRF-TOKEN
         xsrf = self.session.cookies.get('XSRF-TOKEN')
         if xsrf:
             return unquote(xsrf)
-        for cookie in self.session.cookies:
-            name = cookie.name if hasattr(cookie, 'name') else cookie
-            if name.upper() == 'XSRF-TOKEN':
-                value = cookie.value if hasattr(cookie, 'value') else self.session.cookies[name]
-                return unquote(value)
+        return ''
+
+    def _get_csrf_from_page(self) -> str:
+        """Получение CSRF токена со страницы"""
+        try:
+            resp = self.session.get(f'{self.BASE_URL}/login')
+            if resp.status_code == 200:
+                # Ищем в куках
+                csrf = self._get_csrf_token()
+                if csrf:
+                    return csrf
+                
+                # Ищем в HTML
+                match = re.search(r'name="csrf-token"\s+content="([^"]+)"', resp.text)
+                if match:
+                    return match.group(1)
+                
+                # Ищем в JavaScript
+                match = re.search(r'csrf_token\s*[:=]\s*["\']([^"\']+)["\']', resp.text)
+                if match:
+                    return match.group(1)
+                
+                # Ищем в форме
+                match = re.search(r'<input[^>]*name="_token"[^>]*value="([^"]+)"', resp.text)
+                if match:
+                    return match.group(1)
+        except:
+            pass
         return ''
 
     def login(self, email: str, password: str):
-        resp = self.session.get(f'{self.BASE_URL}/login')
-        if resp.status_code != 200:
-            return False, f'GET login failed: HTTP {resp.status_code}'
+        """Правильная авторизация (как в браузере)"""
+        print(f"[LOGIN] Попытка входа для {email}")
+        
+        # 1. Получаем страницу логина (получаем куки и CSRF)
+        try:
+            resp = self.session.get(f'{self.BASE_URL}/login')
+            print(f"[LOGIN] GET /login статус: {resp.status_code}")
+            
+            if resp.status_code != 200:
+                return False, f'GET login failed: HTTP {resp.status_code}'
+            
+            # Проверяем Cloudflare
+            if 'cf-browser-verification' in resp.text or 'cloudflare' in resp.text.lower():
+                print("[LOGIN] Обнаружена Cloudflare, ждём 3 сек...")
+                time.sleep(3)
+                resp = self.session.get(f'{self.BASE_URL}/login')
+                if resp.status_code != 200:
+                    return False, f'Cloudflare защита: HTTP {resp.status_code}'
+            
+        except Exception as e:
+            return False, f'Ошибка получения страницы: {str(e)}'
 
-        csrf = self._get_csrf_from_cookies()
-        if not csrf:
-            return False, 'CSRF token not found'
+        # 2. Получаем CSRF токен
+        csrf_token = self._get_csrf_token()
+        if not csrf_token:
+            csrf_token = self._get_csrf_from_page()
+        
+        if not csrf_token:
+            return False, 'CSRF токен не найден'
+        
+        print(f"[LOGIN] CSRF токен получен: {csrf_token[:30]}...")
 
-        time.sleep(0.5)  # Уменьшено с 1 сек
-
-        login_data = {'email': email, 'password': password, 'remember': 'on'}
-        headers = {
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-            'X-XSRF-TOKEN': csrf,
-            'X-Requested-With': 'XMLHttpRequest',
-            'Referer': f'{self.BASE_URL}/login',
-            'Origin': self.BASE_URL,
+        # 3. Отправляем запрос как в браузере
+        time.sleep(0.5)
+        
+        # Данные формы (как в оригинальном запросе)
+        login_data = {
+            'email': email,
+            'password': password,
+            'remember': 'on'
         }
-        resp = self.session.post(f'{self.BASE_URL}/login', data=login_data, headers=headers, allow_redirects=False)
-
-        check = self.session.get(f'{self.BASE_URL}/')
-        if check.status_code != 200:
-            return False, 'Auth check failed'
-
-        html_text = check.text
-        match = re.search(r'data-userid="(\d+)"', html_text)
-        if not match:
-            match = re.search(r'/users/(\d+)', html_text)
-        if match:
-            user_id = match.group(1)
-            cookies = []
-            for name, value in self.session.cookies.items():
-                cookies.append({'name': name, 'value': value, 'domain': 'mangabuff.ru'})
-            return True, {'user_id': user_id, 'cookies': cookies}
-        else:
-            return False, 'User ID not found after login'
+        
+        # Заголовки как в реальном запросе
+        headers = {
+            'Accept': '*/*',
+            'Accept-Encoding': 'gzip, deflate, br, zstd',
+            'Accept-Language': 'ru-RU,ru;q=0.9,be-BY;q=0.8,be;q=0.7,en-US;q=0.6,en;q=0.5',
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'Origin': self.BASE_URL,
+            'Referer': f'{self.BASE_URL}/login',
+            'Sec-Ch-Ua': '"Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
+            'X-CSRF-TOKEN': csrf_token,  # КЛЮЧЕВОЙ ЗАГОЛОВОК!
+            'X-Requested-With': 'XMLHttpRequest',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36',
+        }
+        
+        try:
+            # Отправляем POST запрос
+            resp = self.session.post(
+                f'{self.BASE_URL}/login',
+                data=login_data,
+                headers=headers,
+                allow_redirects=False
+            )
+            
+            print(f"[LOGIN] POST /login статус: {resp.status_code}")
+            print(f"[LOGIN] Ответ: {resp.text[:200] if resp.text else 'пусто'}")
+            
+            # Проверяем ответ
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                    if data.get('status') == 'success':
+                        print("[LOGIN] Успешный вход!")
+                        
+                        # Проверяем авторизацию
+                        if self.is_authenticated():
+                            user_id = self.get_user_id()
+                            if user_id:
+                                cookies = []
+                                for name, value in self.session.cookies.items():
+                                    cookies.append({
+                                        'name': name,
+                                        'value': value,
+                                        'domain': 'mangabuff.ru'
+                                    })
+                                return True, {
+                                    'user_id': user_id,
+                                    'cookies': cookies
+                                }
+                        return True, {'user_id': 'unknown', 'cookies': []}
+                    else:
+                        error_msg = data.get('message', 'Неизвестная ошибка')
+                        return False, f'Ошибка входа: {error_msg}'
+                except json.JSONDecodeError:
+                    # Если ответ не JSON, проверяем HTML
+                    if 'Вход выполнен' in resp.text or 'redirect' in resp.text:
+                        user_id = self.get_user_id()
+                        if user_id:
+                            cookies = []
+                            for name, value in self.session.cookies.items():
+                                cookies.append({
+                                    'name': name,
+                                    'value': value,
+                                    'domain': 'mangabuff.ru'
+                                })
+                            return True, {
+                                'user_id': user_id,
+                                'cookies': cookies
+                            }
+                    return False, 'Не удалось распарсить ответ сервера'
+                    
+            elif resp.status_code in [302, 301]:
+                # Редирект - обычно успешный вход
+                print("[LOGIN] Редирект после входа (успех)")
+                user_id = self.get_user_id()
+                if user_id:
+                    cookies = []
+                    for name, value in self.session.cookies.items():
+                        cookies.append({
+                            'name': name,
+                            'value': value,
+                            'domain': 'mangabuff.ru'
+                        })
+                    return True, {
+                        'user_id': user_id,
+                        'cookies': cookies
+                    }
+                return False, 'Редирект без авторизации'
+            else:
+                return False, f'POST вернул статус {resp.status_code}'
+                
+        except Exception as e:
+            return False, f'Ошибка отправки запроса: {str(e)}'
 
     def load_cookies(self, cookies_list: list):
+        """Загрузка сохранённых кук"""
         for c in cookies_list:
             name = c.get('name')
             value = c.get('value')
-            domain = c.get('domain', 'mangabuff.ru')
             if name and value:
-                self.session.cookies.set(name, value, domain=domain)
+                self.session.cookies.set(name, value, domain='mangabuff.ru')
+        print(f"[COOKIES] Загружено {len(cookies_list)} кук")
 
     def is_authenticated(self) -> bool:
+        """Проверка авторизации"""
         try:
             resp = self.session.get(f'{self.BASE_URL}/')
             if resp.status_code != 200:
                 return False
+            
             html_text = resp.text
+            
+            # Проверяем наличие user_id
             if re.search(r'data-userid="\d+"', html_text):
                 return True
+            
+            # Проверяем элементы авторизованного пользователя
             if 'header__user' in html_text or '/logout' in html_text:
                 return True
+            
+            # Проверяем через JavaScript
+            if re.search(r'user\s*[:=]\s*{[^}]*id\s*[:=]\s*\d+', html_text):
+                return True
+            
             return False
-        except:
+        except Exception as e:
+            print(f"[AUTH CHECK] Ошибка: {e}")
             return False
 
     def get_user_id(self) -> str:
-        resp = self.session.get(f'{self.BASE_URL}/')
-        if resp.status_code != 200:
+        """Получение ID пользователя"""
+        try:
+            resp = self.session.get(f'{self.BASE_URL}/', timeout=10)
+            if resp.status_code != 200:
+                return None
+            
+            html_text = resp.text
+            
+            # Ищем data-userid
+            match = re.search(r'data-userid="(\d+)"', html_text)
+            if match:
+                return match.group(1)
+            
+            # Ищем в ссылке профиля
+            match = re.search(r'/users/(\d+)', html_text)
+            if match:
+                return match.group(1)
+            
+            # Ищем в JavaScript
+            match = re.search(r'userid\s*[:=]\s*["\']?(\d+)["\']?', html_text)
+            if match:
+                return match.group(1)
+            
             return None
-        match = re.search(r'data-userid="(\d+)"', resp.text)
-        if not match:
-            match = re.search(r'/users/(\d+)', resp.text)
-        return match.group(1) if match else None
+        except:
+            return None
 
-# ==================== ФУНКЦИИ ПАРСИНГА ОБМЕНОВ (ОПТИМИЗИРОВАННЫЕ) ====================
+# ==================== ФУНКЦИИ ПАРСИНГА ОБМЕНОВ ====================
 def get_trades_fast(auth: MangaBuffAuth):
-    """Быстрое получение списка обменов с кэшированием сессии"""
+    """Быстрое получение списка обменов"""
     url = f"{auth.BASE_URL}/trades"
-    response = auth.session.get(url, timeout=10)
-    if response.status_code != 200:
+    try:
+        response = auth.session.get(url, timeout=15)
+        if response.status_code != 200:
+            return []
+        
+        soup = BeautifulSoup(response.text, 'lxml' if 'lxml' in sys.modules else 'html.parser')
+        trades = []
+        
+        trade_items = soup.find_all('a', class_=lambda c: c and 'trade__list-item' in c.split())
+        
+        for item in trade_items:
+            href = item.get('href')
+            if not href or '/trades/' not in href:
+                continue
+            trade_id = href.split('/')[-1]
+            trade_url = f"{auth.BASE_URL}{href}"
+            
+            trades.append({
+                'trade_id': trade_id,
+                'url': trade_url
+            })
+        
+        return trades
+    except Exception as e:
+        print(f"[GET_TRADES] Ошибка: {e}")
         return []
-    
-    # Используем lxml для скорости (если доступен)
-    soup = BeautifulSoup(response.text, 'lxml' if 'lxml' in sys.modules else 'html.parser')
-    trades = []
-    
-    # Оптимизированный поиск
-    trade_items = soup.find_all('a', class_=lambda c: c and 'trade__list-item' in c.split())
-    
-    for item in trade_items:
-        href = item.get('href')
-        if not href or '/trades/' not in href:
-            continue
-        trade_id = href.split('/')[-1]
-        trade_url = f"{auth.BASE_URL}{href}"
-        
-        # Проверяем, новый ли обмен (быстрая проверка)
-        header_div = item.find('div', class_='trade__list-header')
-        is_new = bool(header_div and header_div.find('span', class_='trade__list-dot--new'))
-        
-        # Если обмен не новый - пропускаем для скорости (опционально)
-        # Раскомментируйте, если хотите обрабатывать только новые:
-        # if not is_new:
-        #     continue
-        
-        trades.append({
-            'trade_id': trade_id,
-            'is_new': is_new,
-            'url': trade_url
-        })
-    
-    return trades
 
 def get_trade_details_fast(auth: MangaBuffAuth, trade_id: str):
     """Быстрое получение деталей обмена"""
     url = f"{auth.BASE_URL}/trades/{trade_id}"
-    response = auth.session.get(url, timeout=10)
-    if response.status_code != 200:
-        return None
-    
-    soup = BeautifulSoup(response.text, 'lxml' if 'lxml' in sys.modules else 'html.parser')
-    
-    # Быстрое получение имени отправителя
-    sender_elem = soup.find('a', class_='trade__header-name')
-    if not sender_elem:
-        return None
-    sender_name = sender_elem.text.strip()
-    sender_id = sender_elem.get('href', '').split('/')[-1]
-    
-    # Получение карт (оптимизировано)
-    offered_cards = []
-    creator_div = soup.find('div', class_='trade__main-items trade__main-items--creator')
-    if creator_div:
-        for link in creator_div.find_all('a', class_='trade__main-item'):
-            card_url = f"{auth.BASE_URL}{link.get('href')}"
-            card_id = card_url.split('/')[-2] if '/cards/' in card_url else ''
-            offered_cards.append({'card_id': card_id, 'url': card_url})
+    try:
+        response = auth.session.get(url, timeout=15)
+        if response.status_code != 200:
+            return None
+        
+        soup = BeautifulSoup(response.text, 'lxml' if 'lxml' in sys.modules else 'html.parser')
+        
+        sender_elem = soup.find('a', class_='trade__header-name')
+        if not sender_elem:
+            return None
+        sender_name = sender_elem.text.strip()
+        sender_id = sender_elem.get('href', '').split('/')[-1]
+        
+        offered_cards = []
+        creator_div = soup.find('div', class_='trade__main-items trade__main-items--creator')
+        if creator_div:
+            for link in creator_div.find_all('a', class_='trade__main-item'):
+                card_url = f"{auth.BASE_URL}{link.get('href')}"
+                card_id = card_url.split('/')[-2] if '/cards/' in card_url else ''
+                offered_cards.append({'card_id': card_id, 'url': card_url})
 
-    required_cards = []
-    receiver_div = soup.find('div', class_='trade__main-items trade__main-items--receiver')
-    if receiver_div:
-        for link in receiver_div.find_all('a', class_='trade__main-item'):
-            card_url = f"{auth.BASE_URL}{link.get('href')}"
-            card_id = card_url.split('/')[-2] if '/cards/' in card_url else ''
-            required_cards.append({'card_id': card_id, 'url': card_url})
+        required_cards = []
+        receiver_div = soup.find('div', class_='trade__main-items trade__main-items--receiver')
+        if receiver_div:
+            for link in receiver_div.find_all('a', class_='trade__main-item'):
+                card_url = f"{auth.BASE_URL}{link.get('href')}"
+                card_id = card_url.split('/')[-2] if '/cards/' in card_url else ''
+                required_cards.append({'card_id': card_id, 'url': card_url})
 
-    return {
-        'trade_id': trade_id,
-        'sender_id': sender_id,
-        'sender_name': sender_name,
-        'offered_cards': offered_cards,
-        'required_cards': required_cards,
-        'url': f"{auth.BASE_URL}/trades/{trade_id}"
-    }
+        return {
+            'trade_id': trade_id,
+            'sender_id': sender_id,
+            'sender_name': sender_name,
+            'offered_cards': offered_cards,
+            'required_cards': required_cards,
+            'url': f"{auth.BASE_URL}/trades/{trade_id}"
+        }
+    except Exception as e:
+        print(f"[GET_DETAILS] Ошибка для {trade_id}: {e}")
+        return None
 
 def accept_trade_fast(auth: MangaBuffAuth, trade_id: str, max_retries: int = 2):
-    """Быстрое принятие обмена с минимальными задержками"""
-    csrf = auth._get_csrf_from_cookies()
+    """Быстрое принятие обмена"""
+    csrf = auth._get_csrf_token()
     if not csrf:
         return False, "CSRF token not found"
     
@@ -245,9 +407,9 @@ def accept_trade_fast(auth: MangaBuffAuth, trade_id: str, max_retries: int = 2):
         'X-Requested-With': 'XMLHttpRequest',
         'Referer': f"{auth.BASE_URL}/trades/{trade_id}",
         'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
     }
     
-    # Пробуем разные эндпоинты параллельно (или последовательно быстро)
     endpoints = [
         f"{auth.BASE_URL}/trades/accept",
         f"{auth.BASE_URL}/trades/accept/{trade_id}",
@@ -257,19 +419,28 @@ def accept_trade_fast(auth: MangaBuffAuth, trade_id: str, max_retries: int = 2):
     for attempt in range(max_retries):
         for endpoint in endpoints:
             try:
-                resp = auth.session.post(endpoint, headers=headers, data={'trade_id': trade_id}, timeout=10)
+                resp = auth.session.post(
+                    endpoint, 
+                    headers=headers, 
+                    data={'trade_id': trade_id}, 
+                    timeout=10
+                )
+                
                 if resp.status_code < 400:
                     try:
                         data = resp.json()
                         if data.get('error'):
                             continue
+                        if data.get('status') in ['success', 'ok']:
+                            return True, "Обмен успешно принят!"
                     except:
                         pass
-                    return True, "Обмен успешно принят!"
+                    if resp.status_code == 200:
+                        return True, "Обмен успешно принят!"
+                
             except Exception as e:
                 continue
         
-        # Минимальная задержка перед повторной попыткой
         if attempt < max_retries - 1:
             time.sleep(0.5)
     
@@ -281,7 +452,7 @@ if not BOT_TOKEN:
     print("❌ Не найден TRADE_BOT_TOKEN или BOT_TOKEN в .env файле")
     sys.exit(1)
 
-CHECK_INTERVAL = 5  # Уменьшено с 30 до 5 секунд
+CHECK_INTERVAL = 10
 SESSIONS_FILE = Path(__file__).parent / "tg_sessions.json"
 PROCESSED_TRADES_FILE = Path(__file__).parent / "processed_trades.json"
 
@@ -289,7 +460,7 @@ sessions = {}
 processed_trades = set()
 monitoring_active = False
 monitoring_thread = None
-executor = ThreadPoolExecutor(max_workers=5)  # Пул потоков для параллельной обработки
+executor = ThreadPoolExecutor(max_workers=3)
 
 def load_sessions():
     global sessions
@@ -345,18 +516,16 @@ def get_keyboard():
     )
     return markup
 
-# ==================== МОНИТОРИНГ (ОПТИМИЗИРОВАННЫЙ) ====================
+# ==================== МОНИТОРИНГ ====================
 def process_trade(chat_id, auth, trade):
-    """Обработка одного обмена - выполняется в отдельном потоке"""
+    """Обработка одного обмена"""
     try:
         if trade['trade_id'] in processed_trades:
             return None
         
-        # Добавляем в обработанные сразу, чтобы избежать дублирования
         processed_trades.add(trade['trade_id'])
         save_processed_trades()
         
-        # Получаем детали
         details = get_trade_details_fast(auth, trade['trade_id'])
         if not details:
             return None
@@ -364,7 +533,6 @@ def process_trade(chat_id, auth, trade):
         offered_count = len(details['offered_cards'])
         required_count = len(details['required_cards'])
         
-        # Условие: отдаём 1 карту, получаем 2 и более
         accept = (required_count == 1 and offered_count >= 2)
         
         if accept:
@@ -386,7 +554,7 @@ def process_trade(chat_id, auth, trade):
         message += f"👤 *Отправитель:* {html.escape(details['sender_name'])}\n"
         message += f"🔗 [Ссылка]({details['url']})\n\n"
         message += f"📦 *Предлагают:* {offered_count} карт\n"
-        for card in details['offered_cards'][:5]:  # Ограничиваем вывод
+        for card in details['offered_cards'][:5]:
             message += f"  • [Карта]({card['url']})\n"
         if offered_count > 5:
             message += f"  • ... и ещё {offered_count - 5} карт\n"
@@ -405,12 +573,12 @@ def process_trade(chat_id, auth, trade):
         return details
         
     except Exception as e:
-        print(f"[TRADE-PROCESS] Ошибка обработки обмена {trade.get('trade_id')}: {e}")
+        print(f"[TRADE-PROCESS] Ошибка: {e}")
         return None
 
 def monitoring_loop(chat_id):
     global monitoring_active
-    print(f"[TRADE-MONITOR] Запуск для чата {chat_id} (интервал: {CHECK_INTERVAL}с)")
+    print(f"[MONITOR] Запуск для чата {chat_id}")
     auth = get_auth_for_user(chat_id)
     
     if not auth.is_authenticated():
@@ -418,39 +586,29 @@ def monitoring_loop(chat_id):
         monitoring_active = False
         return
 
-    bot.send_message(chat_id, f"🚀 Мониторинг запущен! Проверка каждые {CHECK_INTERVAL} сек.\nПринимаются обмены 1→2+ (вы отдаёте 1, получаете 2 и более)")
+    bot.send_message(chat_id, f"🚀 Мониторинг запущен! Проверка каждые {CHECK_INTERVAL} сек.")
 
     while monitoring_active:
         try:
             start_time = time.time()
-            
-            # Быстрое получение списка обменов
             trades = get_trades_fast(auth)
             
-            if not trades:
-                time.sleep(0.5)
-                continue
-            
-            # Фильтруем новые обмены
-            new_trades = [t for t in trades if t['trade_id'] not in processed_trades]
-            
-            if new_trades:
-                print(f"[TRADE-MONITOR] Найдено {len(new_trades)} новых обменов")
+            if trades:
+                new_trades = [t for t in trades if t['trade_id'] not in processed_trades]
                 
-                # Параллельная обработка новых обменов
-                futures = []
-                for trade in new_trades:
-                    future = executor.submit(process_trade, chat_id, auth, trade)
-                    futures.append(future)
-                
-                # Ждём завершения всех задач
-                for future in as_completed(futures):
-                    try:
-                        future.result(timeout=5)
-                    except Exception as e:
-                        print(f"[TRADE-MONITOR] Ошибка в потоке: {e}")
+                if new_trades:
+                    print(f"[MONITOR] Найдено {len(new_trades)} новых обменов")
+                    futures = []
+                    for trade in new_trades:
+                        future = executor.submit(process_trade, chat_id, auth, trade)
+                        futures.append(future)
+                    
+                    for future in as_completed(futures):
+                        try:
+                            future.result(timeout=5)
+                        except Exception as e:
+                            print(f"[MONITOR] Ошибка в потоке: {e}")
             
-            # Динамическая задержка: если обменов много, проверяем чаще
             elapsed = time.time() - start_time
             sleep_time = max(1, CHECK_INTERVAL - elapsed)
             
@@ -460,10 +618,10 @@ def monitoring_loop(chat_id):
                 time.sleep(1)
                 
         except Exception as e:
-            print(f"[TRADE-MONITOR] Ошибка: {e}")
+            print(f"[MONITOR] Ошибка: {e}")
             time.sleep(2)
 
-    bot.send_message(chat_id, "🔕 Мониторинг обменов остановлен.")
+    bot.send_message(chat_id, "🔕 Мониторинг остановлен.")
 
 # ==================== КОМАНДЫ БОТА ====================
 @bot.message_handler(commands=['start'])
@@ -471,14 +629,12 @@ def cmd_start(message):
     bot.send_message(
         message.chat.id,
         "🤖 Бот для автоматического обмена картами на mangabuff.ru\n\n"
-        "⚡ **ОПТИМИЗИРОВАННАЯ ВЕРСИЯ** - мгновенное принятие обменов!\n\n"
         "Команды:\n"
         "/login email password – войти в аккаунт\n"
         "/logout – выйти\n"
         "/status – проверить авторизацию\n"
-        "/monitor_start – запустить мониторинг (автопринятие 1→2+)\n"
-        "/monitor_stop – остановить мониторинг\n\n"
-        "Используйте кнопки для управления.",
+        "/monitor_start – запустить мониторинг\n"
+        "/monitor_stop – остановить мониторинг",
         reply_markup=get_keyboard()
     )
 
@@ -497,9 +653,13 @@ def cmd_login(message):
     success, result = auth.login(email, password)
 
     if success:
-        user_id = result['user_id']
-        save_user_session(chat_id, user_id, result['cookies'])
-        bot.send_message(chat_id, f"✅ Успешный вход!\nВаш user_id: {user_id}\nСессия сохранена.")
+        user_id = result.get('user_id', 'unknown')
+        save_user_session(chat_id, user_id, result.get('cookies', []))
+        bot.send_message(
+            chat_id, 
+            f"✅ Успешный вход!\nUser ID: {user_id}\n\n"
+            f"Теперь можно запустить мониторинг: /monitor_start"
+        )
     else:
         bot.send_message(chat_id, f"❌ Ошибка входа: {result}")
 
@@ -533,7 +693,7 @@ def cmd_monitor_start(message):
     monitoring_active = True
     monitoring_thread = threading.Thread(target=monitoring_loop, args=(chat_id,), daemon=True)
     monitoring_thread.start()
-    bot.send_message(chat_id, "✅ Мониторинг обменов запущен.")
+    bot.send_message(chat_id, "✅ Мониторинг запущен.")
 
 @bot.message_handler(commands=['monitor_stop'])
 def cmd_monitor_stop(message):
@@ -550,7 +710,7 @@ def handle_buttons(message):
     chat_id = message.chat.id
     if text == "🔁 Мониторинг обменов":
         if monitoring_active:
-            bot.send_message(chat_id, "⚠️ Мониторинг уже запущен. Используйте /monitor_stop для остановки.")
+            bot.send_message(chat_id, "⚠️ Мониторинг уже запущен.")
         else:
             cmd_monitor_start(message)
     elif text == "📊 Статус":
@@ -559,11 +719,19 @@ def handle_buttons(message):
 def run_bot():
     while True:
         try:
-            print("✅ Торговый бот запущен. Нажмите Ctrl+C для остановки.")
+            print("✅ Бот запущен")
             bot.infinity_polling(timeout=30, long_polling_timeout=30)
         except Exception as e:
-            print(f"❌ Ошибка соединения: {e}. Переподключение через 5 секунд...")
+            print(f"❌ Ошибка: {e}. Переподключение через 5 сек...")
             time.sleep(5)
 
 if __name__ == '__main__':
+    print("Проверка установки...")
+    try:
+        import curl_cffi
+        print("✅ curl_cffi - OK")
+    except:
+        print("❌ curl_cffi не установлен")
+        sys.exit(1)
+    
     run_bot()
